@@ -10,9 +10,9 @@ The Solana Cross-Chain Protocol facilitates atomic swaps between Solana and othe
 
 - **Hash Time-Locked Contracts (HTLCs)**: Secure cross-chain swaps using cryptographic hash locks and time-based conditions
 - **Partial Fills Support**: Orders can be filled partially using Merkle tree verification
-- **Dutch Auction Mechanism**: Dynamic pricing for order cancellation fees
+- **Dutch Auction Mechanism**: Dynamic pricing for order and cancellation fees
 - **Whitelist System**: Authorized resolvers can execute public functions for improved UX
-- **Multi-Token Support**: Works with both native SOL and SPL tokens
+- **Multi-Token Support**: Works with both native SOL and SPL tokens, supports SPL Token 2022 (with limited extensions)
 - **Safety Deposits**: Incentivizes proper execution and covers transaction costs
 - **Rescue Funds**: Recovery mechanism for stuck tokens after a timeout period
 
@@ -21,19 +21,19 @@ The Solana Cross-Chain Protocol facilitates atomic swaps between Solana and othe
 The protocol consists of three main programs:
 
 ### 1. Cross-Chain Escrow Source (`cross-chain-escrow-src`)
-- **Program ID**: `2g4JDRMD7G3dK1PHmCnDAycKzd6e5sdhxqGBbs264zwz`
+- **Program ID**: `4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh`
 - Handles order creation and escrow initialization on the source chain
 - Manages withdrawals using secret revelation
 - Implements cancellation logic with Dutch auction for fees
 
 ### 2. Cross-Chain Escrow Destination (`cross-chain-escrow-dst`)
-- **Program ID**: `GveV3ToLhvRmeq1Fyg3BMkNetZuG9pZEp4uBGWLrTjve`
+- **Program ID**: `AMEAktCrii7mVFQKCM9i5hKES4YrV3zFagrawr8BY8pb`
 - Creates matching escrows on the destination chain
 - Processes withdrawals when secrets are revealed
 - Handles cancellations after timeout periods
 
 ### 3. Whitelist Validator (`whitelist`)
-- **Program ID**: `3zPcYCrngDJQjzTd7vN1povXWtxwKR1BbofWoaHYxPhv`
+- **Program ID**: `5XYZ3LMWECpC6u7BWLskMMNx4xWbXF44dpDxvkVqkHtA`
 - Manages authorized resolvers who can execute public functions
 - Provides access control for sensitive operations
 
@@ -75,17 +75,21 @@ yarn test
 
 ```rust
 // Create an order on the source chain
-let order_hash = create_order(
-    hashlock,           // Hash of the secret (or Merkle root for partial fills)
-    amount,             // Amount of tokens to swap
-    safety_deposit,     // Safety deposit amount
-    timelocks,          // Time windows for different stages
-    expiration_time,    // Order expiration timestamp
-    asset_is_native,    // Whether the token is native SOL
-    dst_amount,         // Expected amount on destination chain
-    dutch_auction_data, // Auction parameters for cancellation
-    allow_multiple_fills, // Enable partial fills
-    salt                // Random salt for uniqueness
+pub fn create(
+    ctx: Context<Create>,
+    hashlock: [u8; 32], // Root of merkle tree if partially filled
+    amount: u64,
+    safety_deposit: u64,
+    timelocks: [u64; 4],
+    expiration_time: u32,
+    asset_is_native: bool,
+    dst_amount: [u64; 4],
+    dutch_auction_data_hash: [u8; 32],
+    max_cancellation_premium: u64,
+    cancellation_auction_duration: u32,
+    allow_multiple_fills: bool,
+    salt: u64,
+    _dst_chain_params: DstChainParams,
 );
 ```
 
@@ -93,11 +97,11 @@ let order_hash = create_order(
 
 ```rust
 // Taker creates escrow by filling the order
-create_escrow(
-    order_hash,
-    amount,           // Amount to fill (can be partial)
-    merkle_proof,     // Proof for partial fills (optional)
-    auction_data      // Dutch auction parameters
+pub fn create_escrow(
+    ctx: Context<CreateEscrow>,
+    amount: u64,
+    merkle_proof: Option<MerkleProof>,
+    dutch_auction_data: AuctionData,
 );
 ```
 
@@ -105,23 +109,24 @@ create_escrow(
 
 ```rust
 // Create matching escrow on destination chain
-create_dst_escrow(
-    order_hash,
-    hashlock,
-    amount,
-    safety_deposit,
-    recipient,
-    timelocks,
-    src_cancellation_timestamp,
-    asset_is_native
-);
+pub fn create(
+        ctx: Context<Create>,
+        order_hash: [u8; 32],
+        hashlock: [u8; 32],
+        amount: u64,
+        safety_deposit: u64,
+        recipient: Pubkey,
+        timelocks: [u64; 4],
+        src_cancellation_timestamp: u32,
+        asset_is_native: bool,
+)
 ```
 
 ### Withdrawing Funds
 
 ```rust
 // Withdraw by revealing the secret
-withdraw(secret); // Must match the hashlock
+pub fn withdraw(ctx: Context<Withdraw>, secret: [u8; 32])
 ```
 
 ## Timelock Stages
@@ -157,7 +162,7 @@ yarn test
 yarn coverage
 
 # Run specific test file
-yarn test tests/test_cross_chain_escrow_src.ts
+yarn test ./programs/cross-chain-escrow-src/tests/test_cross_chain_escrow_src_native.ts
 ```
 
 ### Linting
