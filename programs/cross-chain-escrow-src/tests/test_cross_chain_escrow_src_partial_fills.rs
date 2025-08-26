@@ -187,7 +187,8 @@ run_for_tokens!(
                 create_order_for_partial_fill(test_state).await;
 
                 let escrow_amount = 33334;
-                prepare_resolvers(test_state, &[test_state.taker_wallet.keypair.pubkey()]).await;
+                prepare_resolvers_src(test_state, &[test_state.taker_wallet.keypair.pubkey()])
+                    .await;
                 let (escrow, _) =
                     test_escrow_creation_for_partial_fill(test_state, escrow_amount).await;
 
