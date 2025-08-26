@@ -40,7 +40,8 @@ impl<S: TokenVariant> EscrowVariant<S> for DstProgram {
             });
 
         let (_, taker_ata) = find_user_ata(test_state);
-        let (whitelist_access, _) = get_whitelist_access_address(&withdrawer.pubkey());
+        let (whitelist_access, _) =
+            get_whitelist_access_address(&cross_chain_escrow_dst::ID, &withdrawer.pubkey());
 
         let instruction: Instruction = Instruction {
             program_id: cross_chain_escrow_dst::id(),
@@ -53,6 +54,7 @@ impl<S: TokenVariant> EscrowVariant<S> for DstProgram {
                 AccountMeta::new(*escrow, false),
                 AccountMeta::new(*escrow_ata, false),
                 AccountMeta::new(taker_ata, false),
+                AccountMeta::new_readonly(spl_associated_token_id, false),
                 AccountMeta::new_readonly(S::get_token_program_id(), false),
                 AccountMeta::new_readonly(system_program_id, false),
             ],
@@ -88,6 +90,7 @@ impl<S: TokenVariant> EscrowVariant<S> for DstProgram {
                 AccountMeta::new(*escrow, false),
                 AccountMeta::new(*escrow_ata, false),
                 AccountMeta::new(taker_ata, false),
+                AccountMeta::new_readonly(spl_associated_token_id, false),
                 AccountMeta::new_readonly(S::get_token_program_id(), false),
                 AccountMeta::new_readonly(system_program_id, false),
             ],
@@ -187,9 +190,7 @@ impl<S: TokenVariant> EscrowVariant<S> for DstProgram {
             InstructionData::data(&cross_chain_escrow_dst::instruction::RescueFunds {
                 hashlock: test_state.hashlock.to_bytes(),
                 order_hash: test_state.order_hash.to_bytes(),
-                escrow_mint: test_state.token,
                 escrow_amount: test_state.test_arguments.escrow_amount,
-                safety_deposit: test_state.test_arguments.safety_deposit,
                 rescue_amount: test_state.test_arguments.rescue_amount,
             });
 
@@ -218,5 +219,9 @@ impl<S: TokenVariant> EscrowVariant<S> for DstProgram {
 
     fn get_escrow_data_len() -> usize {
         DEFAULT_DST_ESCROW_SIZE
+    }
+
+    fn get_escrow_creator_wallet(test_state: &TestState<S>) -> Wallet {
+        test_state.maker_wallet.clone()
     }
 }

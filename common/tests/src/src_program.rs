@@ -75,7 +75,8 @@ impl<S: TokenVariant> EscrowVariant<S> for SrcProgram {
             });
 
         let (_, taker_ata) = find_user_ata(test_state);
-        let (whitelist_access, _) = get_whitelist_access_address(&withdrawer.pubkey());
+        let (whitelist_access, _) =
+            get_whitelist_access_address(&cross_chain_escrow_src::ID, &withdrawer.pubkey());
 
         let instruction: Instruction = Instruction {
             program_id: cross_chain_escrow_src::id(),
@@ -144,13 +145,15 @@ impl<S: TokenVariant> EscrowVariant<S> for SrcProgram {
         let instruction_data =
             InstructionData::data(&cross_chain_escrow_src::instruction::CreateEscrow {
                 amount: test_state.test_arguments.escrow_amount,
-                dutch_auction_data: test_state.test_arguments.dutch_auction_data.clone(),
                 merkle_proof: test_state.test_arguments.merkle_proof.clone(),
+                dutch_auction_data: test_state.test_arguments.dutch_auction_data.clone(),
             });
 
         let (order, order_ata) = get_order_addresses(test_state);
-        let (whitelist_access, _) =
-            get_whitelist_access_address(&test_state.taker_wallet.keypair.pubkey());
+        let (whitelist_access, _) = get_whitelist_access_address(
+            &cross_chain_escrow_src::ID,
+            &test_state.taker_wallet.keypair.pubkey(),
+        );
 
         let instruction: Instruction = Instruction {
             program_id: cross_chain_escrow_src::id(),
@@ -188,10 +191,7 @@ impl<S: TokenVariant> EscrowVariant<S> for SrcProgram {
             InstructionData::data(&cross_chain_escrow_src::instruction::RescueFundsForEscrow {
                 hashlock: test_state.hashlock.to_bytes(),
                 order_hash: test_state.order_hash.to_bytes(),
-                maker: test_state.maker_wallet.keypair.pubkey(),
-                token: test_state.token,
                 amount: test_state.test_arguments.escrow_amount,
-                safety_deposit: test_state.test_arguments.safety_deposit,
                 rescue_amount: test_state.test_arguments.rescue_amount,
             });
 
@@ -220,6 +220,10 @@ impl<S: TokenVariant> EscrowVariant<S> for SrcProgram {
     fn get_escrow_data_len() -> usize {
         DEFAULT_SRC_ESCROW_SIZE
     }
+
+    fn get_escrow_creator_wallet(test_state: &TestState<S>) -> Wallet {
+        test_state.taker_wallet.clone()
+    }
 }
 
 pub fn create_public_escrow_cancel_tx<S: TokenVariant>(
@@ -232,7 +236,8 @@ pub fn create_public_escrow_cancel_tx<S: TokenVariant>(
         InstructionData::data(&cross_chain_escrow_src::instruction::PublicCancelEscrow {});
 
     let (maker_ata, _) = find_user_ata(test_state);
-    let (whitelist_access, _) = get_whitelist_access_address(&canceller.pubkey());
+    let (whitelist_access, _) =
+        get_whitelist_access_address(&cross_chain_escrow_src::ID, &canceller.pubkey());
 
     let instruction: Instruction = Instruction {
         program_id: cross_chain_escrow_src::id(),
@@ -290,8 +295,10 @@ pub fn get_rescue_funds_from_order_tx<S: TokenVariant>(
             rescue_amount: test_state.test_arguments.rescue_amount,
         });
 
-    let (whitelist_access, _) =
-        get_whitelist_access_address(&test_state.taker_wallet.keypair.pubkey());
+    let (whitelist_access, _) = get_whitelist_access_address(
+        &cross_chain_escrow_src::ID,
+        &test_state.taker_wallet.keypair.pubkey(),
+    );
 
     let instruction: Instruction = Instruction {
         program_id: cross_chain_escrow_src::id(),
@@ -492,8 +499,10 @@ pub fn get_cancel_order_by_resolver_tx<T: EscrowVariant<S>, S: TokenVariant>(
     let instruction_data = InstructionData::data(
         &cross_chain_escrow_src::instruction::CancelOrderByResolver { reward_limit },
     );
-    let (whitelist_access, _) =
-        get_whitelist_access_address(&test_state.taker_wallet.keypair.pubkey());
+    let (whitelist_access, _) = get_whitelist_access_address(
+        &cross_chain_escrow_src::ID,
+        &test_state.taker_wallet.keypair.pubkey(),
+    );
 
     let maker_ata = if let Some(ata) = opt_maker_ata {
         *ata
