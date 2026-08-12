@@ -10,8 +10,6 @@ use test_context::{test_context, AsyncTestContext};
 
 // ============================================================================
 // SKENARIO 1: Realistic End-to-End Cross-Chain Exit Scam
-// Flow: Normal Order Creation -> Whitelist Takeover -> Register as Resolver -> 
-// Fill Order -> Exploit rescue_funds (No Secret Needed)
 // ============================================================================
 #[test_context(TestStateBase<SrcProgram, TokenSPL>)]
 #[tokio::test]
@@ -41,7 +39,9 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
 
     let maker_initial_jup = get_token_balance(&mut src_state.context, &src_state.maker_wallet.token_account).await;
     let attacker_initial_jup = get_token_balance(&mut src_state.context, &src_state.taker_wallet.token_account).await;
-    let attacker_initial_sol = dst_state.client.get_balance(&dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    
+    // FIX: Removed & from get_balance
+    let attacker_initial_sol = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
 
     println!("[CHAIN A] Maker locked 100 JUP in Order.");
     println!("[BEFORE] Maker JUP balance: {}", maker_initial_jup);
@@ -89,7 +89,9 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
 
     // 4a: Attacker recovers SOL on DST via rescue_funds(0) due to missing sync_native
     println!("\n--- STEP 1: Attacker recovers SOL on Chain B ---");
-    let attacker_sol_before_rescue = dst_state.client.get_balance(&dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    
+    // FIX: Removed & from get_balance
+    let attacker_sol_before_rescue = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
     
     dst_state.test_arguments.rescue_amount = 0;
     let rescue_tx_dst = DstProgram::get_rescue_funds_tx(
@@ -101,7 +103,8 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     );
     dst_state.client.process_transaction(rescue_tx_dst).await.expect_success();
 
-    let attacker_sol_after_rescue = dst_state.client.get_balance(&dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    // FIX: Removed & from get_balance
+    let attacker_sol_after_rescue = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
     let recovered_sol = attacker_sol_after_rescue - attacker_sol_before_rescue;
     
     println!("[CHAIN B] Attacker recovered {} lamports ({} SOL) via rescue_funds(0)!", 
@@ -137,7 +140,9 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     
     let maker_final_jup = get_token_balance(&mut src_state.context, &src_state.maker_wallet.token_account).await;
     let attacker_final_jup = get_token_balance(&mut src_state.context, &src_state.taker_wallet.token_account).await;
-    let attacker_final_sol = dst_state.client.get_balance(&dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    
+    // FIX: Removed & from get_balance
+    let attacker_final_sol = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
     
     let net_sol_change = attacker_final_sol as i64 - attacker_initial_sol as i64;
     let net_jup_change = attacker_final_jup as i64 - attacker_initial_jup as i64;
